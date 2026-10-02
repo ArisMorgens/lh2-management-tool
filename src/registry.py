@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-JSON-backed registry mapping station names to MAC addresses
-and their mode value.
+JSON-backed registry mapping station names to MAC addresses.
+Nothing else is stored; everything else is read live from the stations.
 """
 
 import json
@@ -26,16 +26,16 @@ def all():
     return load()
 
 
-def add(name, mac, mode=None, firmware=None):
+def add(name, mac):
     data = load()
-    data[name] = {'mac': mac, 'mode': mode, 'firmware': firmware}
+    data[name] = {'mac': mac}
     save(data)
 
 
-def update(name, **fields):
+def rename(old, new):
     data = load()
-    if name in data:
-        data[name].update(fields)
+    if old in data:
+        data[new] = data.pop(old)
         save(data)
 
 

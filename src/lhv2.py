@@ -15,6 +15,11 @@ LHV2_GATT_SERVICE_UUID = btle.UUID('00001523-1212-efde-1523-785feabcd124')
 LHV2_GATT_CHAR_POWER_CTRL_UUID = btle.UUID('00001525-1212-efde-1523-785feabcd124')
 LHV2_GATT_CHAR_MODE_UUID = btle.UUID('00001524-1212-efde-1523-785feabcd124')
 LHV2_GATT_CHAR_IDENTIFY_UUID = btle.UUID('00008421-1212-efde-1523-785feabcd124')
+# Base station info block (the OOTX frame), only on radio firmware 2.x. Layout as
+# ootxDataFrame_s in crazyflie-firmware, from
+# https://github.com/nairol/LighthouseRedox/blob/master/docs/Base%20Station.md#base-station-info-block
+LHV2_GATT_CHAR_INFO_UUID = btle.UUID('00000010-0060-7990-5544-1cce81af42f0')
+INFO_FAULTS_OFFSET = 32  # 'faults': fault flags, 0 when the station is healthy
 # Power management
 POWER_ON = b'\x01'
 POWER_OFF = b'\x00'
@@ -41,7 +46,9 @@ def decodePowerState(raw):
     """Decode a power-control characteristic read-back into a human label."""
     if not raw:
         return 'Unknown'
-    return POWER_STATE_LABELS.get(raw[0], f'Unknown (0x{raw[0]:02x})')
+    # Seen on radio firmware 1.1 and 2.2: after power-up the characteristic
+    # holds an arbitrary byte until the first power write
+    return POWER_STATE_LABELS.get(raw[0], f'Not set since boot (0x{raw[0]:02x})')
 
 
 class LHV2:
@@ -111,6 +118,13 @@ class LHV2:
         # some firmware separates the R/M/B fields with newlines instead of
         # commas, which a single-line table cell would otherwise swallow
         return ', '.join(line.strip() for line in text.splitlines() if line.strip())
+
+    def readFaults(self):
+        """The 'faults' byte of the info block, or None if the firmware doesn't expose it (1.1)."""
+        if LHV2_GATT_CHAR_INFO_UUID not in self.characteristics:
+            return None
+        raw = self.getCharacteristic(LHV2_GATT_CHAR_INFO_UUID).read()
+        return raw[INFO_FAULTS_OFFSET] if len(raw) > INFO_FAULTS_OFFSET else None
 
     def getName(self):
         return self.name

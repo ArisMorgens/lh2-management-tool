@@ -20,9 +20,37 @@ INTERFACE = 0
 TRY_COUNT = 3
 TRY_PAUSE = 2
 
-COLUMNS = ('name', 'mode', 'mac', 'firmware', 'status')
-COLUMN_LABELS = ('Name', 'Mode', 'MAC', 'Firmware', 'Status')
+COLUMNS = ('name', 'mode', 'mac', 'firmware', 'status', 'health')
+COLUMN_LABELS = ('Name', 'Mode ⓘ', 'MAC', 'Firmware', 'Status ⓘ', 'Health ⓘ')
 SEPARATOR_IID = '__separator__'
+
+# Shown when hovering the column heading. What the radio reports depends on its
+# firmware (the "R:" part of the Firmware column).
+COLUMN_TOOLTIPS = {
+    'mode': (
+        "The channel as reported by the station's Bluetooth radio.\n\n"
+        "Radio firmware 2.x: always matches the station's channel.\n\n"
+        "Radio firmware 1.1: shows a leftover value (e.g. 234). The base station still runs on its correct channel."),
+    'status': (
+        "The power state as reported by the station's Bluetooth radio.\n\n"
+        "\"Not set since boot\" (radio firmware 1.1 and 2.2): the radio hasn't been told a "
+        "power state since the station was powered up. The station is running; "
+        "sending Wake or Sleep once gives a real status."),
+    'health': (
+        "Experimental.\n\n"
+        "Read from the 'faults' field of the station's info block, documented as fault "
+        "flags that are 0 on a healthy station. \"Fault\" shows the raw value; what the "
+        "individual bits mean isn't documented.\n\n"
+        "Radio firmware 1.1 stations don't report it (–)."),
+}
+TOOLTIP_WRAP = 380
+
+
+def healthLabel(faults):
+    """Health column text for the info block's 'faults' byte (None: not reported)."""
+    if faults is None:
+        return '–'
+    return 'OK' if faults == 0 else f'Fault (0x{faults:02x})'
 
 
 class Lh2Gui:
@@ -30,7 +58,9 @@ class Lh2Gui:
         self.root = root
         self.root.title('Lighthouse Base Station Manager')
         self.events = queue.Queue()
-        self.stations = {}   # mac -> {'name','mode','mac','firmware','status'}; name=None means unregistered
+        # mac -> {'name','mode','mac','firmware','status','health'}; name=None means unregistered.
+        # Only name -> MAC is persisted; everything else is read live over BLE.
+        self.stations = {}
         self.busy_macs = set()
         self._scan_active = False
 
@@ -48,14 +78,18 @@ class Lh2Gui:
         for col, label in zip(COLUMNS, COLUMN_LABELS):
             self.tree.heading(col, text=label)
         self.tree.pack(fill='both', expand=True, side='left')
+        self._tooltip = None
+        self._tooltip_text = None
+        self.tree.bind('<Motion>', self._on_tree_motion)
+        self.tree.bind('<Leave>', lambda _e: self._hide_tooltip())
 
         btns = ttk.Frame(main_frame)
         btns.pack(side='left', fill='y', padx=8)
         self.scan_btn = ttk.Button(btns, text='Scan', command=self._start_scan)
         self.scan_btn.pack(fill='x', pady=2)
         ttk.Separator(btns).pack(fill='x', pady=6)
-        ttk.Button(btns, text='On', command=lambda: self._power_selected(True)).pack(fill='x', pady=2)
-        ttk.Button(btns, text='Off', command=lambda: self._power_selected(False)).pack(fill='x', pady=2)
+        ttk.Button(btns, text='Wake', command=lambda: self._power_selected(True)).pack(fill='x', pady=2)
+        ttk.Button(btns, text='Sleep', command=lambda: self._power_selected(False)).pack(fill='x', pady=2)
         ttk.Button(btns, text='Get Status', command=self._get_status_selected).pack(fill='x', pady=2)
         ttk.Button(btns, text='Identify', command=self._identify_selected).pack(fill='x', pady=2)
         ttk.Separator(btns).pack(fill='x', pady=6)
@@ -69,14 +103,39 @@ class Lh2Gui:
         self.status_var = tk.StringVar(value='Ready')
         ttk.Label(self.root, textvariable=self.status_var, anchor='w').pack(fill='x', padx=8, pady=(0, 8))
 
+    # ---- heading tooltips --------------------------------------------------------
+    def _on_tree_motion(self, event):
+        col = None
+        if self.tree.identify_region(event.x, event.y) == 'heading':
+            idx = int(self.tree.identify_column(event.x).lstrip('#')) - 1
+            col = COLUMNS[idx] if 0 <= idx < len(COLUMNS) else None
+        text = COLUMN_TOOLTIPS.get(col)
+        if not text:
+            self._hide_tooltip()
+            return
+        x, y = event.x_root + 12, event.y_root + 16
+        if self._tooltip and self._tooltip_text == text:
+            self._tooltip.geometry(f'+{x}+{y}')
+            return
+        self._hide_tooltip()
+        self._tooltip = tk.Toplevel(self.root)
+        self._tooltip.wm_overrideredirect(True)
+        self._tooltip.geometry(f'+{x}+{y}')
+        tk.Label(self._tooltip, text=text, justify='left', wraplength=TOOLTIP_WRAP,
+                 relief='solid', borderwidth=1, background='#ffffe0', padx=6, pady=4).pack()
+        self._tooltip_text = text
+
+    def _hide_tooltip(self):
+        if self._tooltip:
+            self._tooltip.destroy()
+            self._tooltip = None
+
     # ---- table state ----------------------------------------------------------
     def _load_registered(self):
         for name, info in registry.all().items():
             mac = info['mac']
             st = self.stations.setdefault(mac, self._blank_station(mac))
             st['name'] = name
-            st['mode'] = info.get('mode')
-            st['firmware'] = info.get('firmware')
         self._refresh_table()
 
     def _refresh_all_statuses(self):
@@ -86,7 +145,8 @@ class Lh2Gui:
 
     @staticmethod
     def _blank_station(mac):
-        return {'name': None, 'mode': None, 'mac': mac, 'firmware': None, 'status': None}
+        return {'name': None, 'mode': None, 'mac': mac, 'firmware': None, 'status': None,
+                'health': None}
 
     def _refresh_table(self):
         self.tree.delete(*self.tree.get_children())
@@ -109,7 +169,7 @@ class Lh2Gui:
     def _insert_row(self, mac, st):
         self.tree.insert('', 'end', iid=mac, values=(
             st['name'] or '', st['mode'] if st['mode'] is not None else '',
-            mac, st['firmware'] or '', st['status'] or ''))
+            mac, st['firmware'] or '', st['status'] or '', st['health'] or ''))
 
     def _selected_macs(self):
         sel = [mac for mac in self.tree.selection() if mac != SEPARATOR_IID]
@@ -171,26 +231,27 @@ class Lh2Gui:
         try:
             lhv2 = LHV2(mac, INTERFACE, verbose=0)
             lhv2.connect(TRY_COUNT, TRY_PAUSE)
-            mode_hex = lhv2.readMode().hex()
+            mode = lhv2.readMode()
             firmware = lhv2.readFirmwareRevision()
-            adv_name = lhv2.getName() or mac
+            adv_name = lhv2.getName()
             lhv2.disconnect()
         except Exception as e:
             self.events.put(('register_read_failed', (mac, str(e))))
             return
-        self.events.put(('register_ready', (mac, adv_name, mode_hex, firmware)))
+        self.events.put(('register_ready', (mac, adv_name, mode[0] if mode else None, firmware)))
 
-    def _open_register_dialog(self, mac, adv_name, mode_hex, firmware=None):
+    def _open_register_dialog(self, mac, adv_name, mode=None, firmware=None):
+        st = self.stations.setdefault(mac, self._blank_station(mac))
         name = simpledialog.askstring(
-            'Register station', f'Name for {adv_name} ({mac}):', initialvalue=adv_name)
+            'Register station', f'Name for {adv_name or mac} ({mac}):', initialvalue=adv_name or mac)
         if not name:
             return
-        mode_value = int(mode_hex, 16) if mode_hex else None
-        registry.add(name, mac, mode_value, firmware=firmware)
-        st = self.stations.setdefault(mac, self._blank_station(mac))
+        registry.add(name, mac)
         st['name'] = name
-        st['mode'] = mode_value
-        st['firmware'] = firmware
+        if mode is not None:
+            st['mode'] = mode
+        if firmware:
+            st['firmware'] = firmware
         self._refresh_table()
         self.status_var.set(f'Registered {name}')
 
@@ -203,8 +264,8 @@ class Lh2Gui:
         if mac in self.busy_macs:
             return
         self.busy_macs.add(mac)
-        self._set_cell(mac, 'status', 'On...' if turn_on else 'Off...')
-        self.status_var.set(f'{"Turning on" if turn_on else "Turning off"} {mac}...')
+        self._set_cell(mac, 'status', 'Waking...' if turn_on else 'Going to sleep...')
+        self.status_var.set(f'{"Waking" if turn_on else "Putting to sleep"} {mac}...')
         threading.Thread(target=self._power_worker, args=(mac, turn_on), daemon=True).start()
 
     def _power_worker(self, mac, turn_on):
@@ -240,14 +301,19 @@ class Lh2Gui:
         try:
             lhv2 = LHV2(mac, INTERFACE, verbose=0)
             lhv2.connect(TRY_COUNT, TRY_PAUSE)
-            mode_hex = lhv2.readMode().hex()
             try:
                 power_label = decodePowerState(lhv2.readPowerState())
             except Exception:
                 power_label = None
             firmware = lhv2.readFirmwareRevision()
+            mode = lhv2.readMode()
+            try:
+                health = healthLabel(lhv2.readFaults())
+            except Exception:
+                health = healthLabel(None)
             lhv2.disconnect()
-            self.events.put(('status_done', (mac, mode_hex, power_label, firmware)))
+            self.events.put(('status_done', (mac, mode[0] if mode else None,
+                                             power_label, firmware, health)))
         except Exception as e:
             self.events.put(('status_failed', (mac, str(e))))
 
@@ -292,8 +358,7 @@ class Lh2Gui:
         new_name = simpledialog.askstring('Rename station', 'New name:', initialvalue=st['name'])
         if not new_name or new_name == st['name']:
             return
-        registry.remove(st['name'])
-        registry.add(new_name, mac, st['mode'], firmware=st['firmware'])
+        registry.rename(st['name'], new_name)
         st['name'] = new_name
         self._refresh_table()
 
@@ -340,20 +405,20 @@ class Lh2Gui:
             self.scan_progress['value'] = 0
             messagebox.showerror('Scan failed', payload)
         elif kind == 'register_ready':
-            mac, adv_name, mode_hex, firmware = payload
+            mac, adv_name, mode, firmware = payload
             self.status_var.set('Ready')
-            self._open_register_dialog(mac, adv_name, mode_hex, firmware)
+            self._open_register_dialog(mac, adv_name, mode, firmware)
         elif kind == 'register_read_failed':
             mac, err = payload
             self.status_var.set('Ready')
             if messagebox.askyesno(
                     'Could not read station',
-                    f'Could not connect to {mac} ({err}).\nRegister anyway without a suggested mode?'):
-                self._open_register_dialog(mac, mac, None)
+                    f'Could not connect to {mac} ({err}).\nRegister anyway?'):
+                self._open_register_dialog(mac, None)
         elif kind == 'power_done':
             mac, turn_on, power_label = payload
             self.busy_macs.discard(mac)
-            self.status_var.set(f'{mac}: powered {"on" if turn_on else "off"}')
+            self.status_var.set(f'{mac}: {"woken" if turn_on else "put to sleep"}')
             if power_label:
                 self._set_cell(mac, 'status', power_label)
         elif kind == 'power_failed':
@@ -377,15 +442,13 @@ class Lh2Gui:
             self._set_cell(mac, 'status', 'unreachable')
             self.status_var.set(f'{mac}: unreachable ({err})')
         elif kind == 'status_done':
-            mac, mode_hex, power_label, firmware = payload
+            mac, mode, power_label, firmware, health = payload
             self.busy_macs.discard(mac)
             self._set_cell(mac, 'status', power_label if power_label else 'n/a')
             self._set_cell(mac, 'firmware', firmware)
-            if mode_hex:
-                self._set_cell(mac, 'mode', int(mode_hex, 16))
-            st = self.stations.get(mac)
-            if st and st['name']:
-                registry.update(st['name'], firmware=firmware)
+            self._set_cell(mac, 'health', health)
+            if mode is not None:
+                self._set_cell(mac, 'mode', mode)
             self.status_var.set(f'{mac}: status updated')
         elif kind == 'status_failed':
             mac, err = payload
