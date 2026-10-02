@@ -24,6 +24,9 @@ SCAN_TICK_MS = 100
 INTERFACE = 0
 TRY_COUNT = 3
 TRY_PAUSE = 2
+# right after Wake a sleeping station briefly reports a transitional power value
+# (0x08, measured on radio firmware 2.9) before Awake, so wait before reading back
+WAKE_SETTLE = 1
 
 COLUMNS = ('name', 'mode', 'id', 'firmware', 'status', 'health')
 COLUMN_LABELS = ('Name', 'Mode ⓘ', 'ID', 'Firmware', 'Status ⓘ', 'Health ⓘ')
@@ -404,6 +407,7 @@ class Lh2Gui:
             lhv2.connect(TRY_COUNT, TRY_PAUSE)
             if turn_on:
                 lhv2.powerOn()
+                time.sleep(WAKE_SETTLE)
             else:
                 lhv2.powerOff()
             try:

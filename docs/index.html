@@ -260,6 +260,9 @@ const POWER_STATE_LABELS = { 0x00: 'Sleeping', 0x01: 'Awake', 0x02: 'Standby', 0
 
 const TRY_COUNT = 3;
 const TRY_PAUSE_MS = 2000;
+// right after Wake a sleeping station briefly reports a transitional power value
+// (0x08, measured on radio firmware 2.9) before Awake, so wait before reading back
+const WAKE_SETTLE_MS = 1000;
 const CONNECT_TIMEOUT_MS = 10000;
 const STORE_KEY = 'lh2-stations';
 
@@ -423,6 +426,7 @@ const OPS = {
   },
   async wake(st, server) {
     await writeByte(await findChar(server, SERVICE, CHAR_POWER), POWER_ON);
+    await sleep(WAKE_SETTLE_MS);
     st.status = await readPowerLabel(server);
     return 'woken';
   },
