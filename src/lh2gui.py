@@ -13,8 +13,11 @@ from bluepy import btle
 
 import registry
 from lhv2 import LHV2, decodePowerState, IdentifyNotSupported
+from lhusb import LhUsb, find_ports as find_usb_ports, CHANNEL_MIN, CHANNEL_MAX
 
 SCAN_TIMEOUT = 8
+# short scan to find the BLE address of a station plugged in over USB
+USB_MATCH_SCAN_TIMEOUT = 4
 SCAN_TICK_MS = 100
 INTERFACE = 0
 TRY_COUNT = 3
@@ -58,11 +61,13 @@ class Lh2Gui:
         self.root = root
         self.root.title('Lighthouse Base Station Manager')
         self.events = queue.Queue()
-        # mac -> {'name','mode','mac','firmware','status','health'}; name=None means unregistered.
+        # mac -> {'name','adv_name','mode','mac','firmware','status','health'}; name=None means unregistered.
         # Only name -> MAC is persisted; everything else is read live over BLE.
         self.stations = {}
         self.busy_macs = set()
         self._scan_active = False
+        self._usb_target_mac = None
+        self._busy_win = None
 
         self._build_ui()
         self._load_registered()
@@ -96,6 +101,9 @@ class Lh2Gui:
         ttk.Button(btns, text='Register', command=self._register_selected).pack(fill='x', pady=2)
         ttk.Button(btns, text='Rename', command=self._rename_selected).pack(fill='x', pady=2)
         ttk.Button(btns, text='Remove', command=self._remove_selected).pack(fill='x', pady=2)
+        ttk.Separator(btns).pack(fill='x', pady=6)
+        self.usb_btn = ttk.Button(btns, text='Set Channel (USB)...', command=self._start_usb_channel)
+        self.usb_btn.pack(fill='x', pady=2)
 
         self.scan_progress = ttk.Progressbar(self.root, mode='determinate', maximum=100)
         self.scan_progress.pack(fill='x', padx=8)
@@ -145,8 +153,8 @@ class Lh2Gui:
 
     @staticmethod
     def _blank_station(mac):
-        return {'name': None, 'mode': None, 'mac': mac, 'firmware': None, 'status': None,
-                'health': None}
+        return {'name': None, 'adv_name': None, 'mode': None, 'mac': mac, 'firmware': None,
+                'status': None, 'health': None}
 
     def _refresh_table(self):
         self.tree.delete(*self.tree.get_children())
@@ -213,7 +221,7 @@ class Lh2Gui:
                 name = dev.getValueText(btle.ScanEntry.COMPLETE_LOCAL_NAME) or \
                     dev.getValueText(btle.ScanEntry.SHORT_LOCAL_NAME)
                 if name and name.startswith('LHB-'):
-                    found.append(dev.addr.upper())
+                    found.append((dev.addr.upper(), name))
             self.events.put(('scan_done', found))
         except Exception as e:
             self.events.put(('scan_error', str(e)))
@@ -242,12 +250,14 @@ class Lh2Gui:
 
     def _open_register_dialog(self, mac, adv_name, mode=None, firmware=None):
         st = self.stations.setdefault(mac, self._blank_station(mac))
+        adv_name = adv_name or st['adv_name']
         name = simpledialog.askstring(
             'Register station', f'Name for {adv_name or mac} ({mac}):', initialvalue=adv_name or mac)
         if not name:
             return
         registry.add(name, mac)
         st['name'] = name
+        st['adv_name'] = adv_name
         if mode is not None:
             st['mode'] = mode
         if firmware:
@@ -311,8 +321,9 @@ class Lh2Gui:
                 health = healthLabel(lhv2.readFaults())
             except Exception:
                 health = healthLabel(None)
+            adv_name = lhv2.getName()
             lhv2.disconnect()
-            self.events.put(('status_done', (mac, mode[0] if mode else None,
+            self.events.put(('status_done', (mac, adv_name, mode[0] if mode else None,
                                              power_label, firmware, health)))
         except Exception as e:
             self.events.put(('status_failed', (mac, str(e))))
@@ -341,6 +352,117 @@ class Lh2Gui:
             self.events.put(('identify_unsupported', (mac, str(e))))
         except Exception as e:
             self.events.put(('identify_failed', (mac, str(e))))
+
+    # ---- channel over USB ----------------------------------------------------------
+    def _start_usb_channel(self):
+        self._usb_target_mac = None
+        self.usb_btn.config(state='disabled')
+        self.status_var.set('Reading the base station on USB...')
+        self._show_busy('Reading the base station on USB...')
+        # BLE names already seen (Scan / Get Status), taken here so the worker
+        # doesn't read self.stations from another thread
+        known = {st['adv_name'].upper(): mac for mac, st in self.stations.items() if st['adv_name']}
+        threading.Thread(target=self._usb_info_worker, args=(known,), daemon=True).start()
+
+    def _usb_info_worker(self, known):
+        try:
+            ports = find_usb_ports()
+            if not ports:
+                raise RuntimeError('No base station found on USB. Plug one in with a data cable.')
+            if len(ports) > 1:
+                raise RuntimeError(f'{len(ports)} base stations on USB ({", ".join(ports)}). '
+                                   'Connect only one at a time.')
+            info = LhUsb(ports[0]).read_info()
+            # the station's BLE name is LHB-<ID>; that links the USB unit to its MAC
+            adv_name = f"LHB-{info['uid']}".upper() if info['uid'] else None
+            mac = known.get(adv_name) if adv_name else None
+            if adv_name and not mac:
+                mac = self._scan_for(adv_name)
+            self.events.put(('usb_info', (ports[0], info, mac, adv_name)))
+        except Exception as e:
+            self.events.put(('usb_failed', str(e)))
+
+    @staticmethod
+    def _scan_for(adv_name):
+        """MAC of the station advertising adv_name, from a short BLE scan, or None."""
+        for dev in btle.Scanner().scan(USB_MATCH_SCAN_TIMEOUT):
+            name = dev.getValueText(btle.ScanEntry.COMPLETE_LOCAL_NAME) or \
+                dev.getValueText(btle.ScanEntry.SHORT_LOCAL_NAME)
+            if name and name.upper() == adv_name:
+                return dev.addr.upper()
+        return None
+
+    def _select_station(self, mac):
+        """Select and scroll to a station's row, adding it as unregistered if it isn't listed."""
+        if mac not in self.stations:
+            self.stations[mac] = self._blank_station(mac)
+            self._refresh_table()
+        self.tree.selection_set(mac)
+        self.tree.focus(mac)
+        self.tree.see(mac)
+
+    def _ask_usb_channel(self, port, info, mac, adv_name):
+        current = info['channel']
+        current_text = 'unknown' if current is None else \
+            '0 (not supported)' if current == 0 else str(current)
+        self._usb_target_mac = mac
+        if mac:
+            self._select_station(mac)
+            st = self.stations[mac]
+            st['adv_name'] = adv_name
+            name_text = st['name'] or f'not registered ({adv_name})'
+        else:
+            # don't leave an unrelated station highlighted
+            self.tree.selection_set(())
+            name_text = (f'{adv_name} not found over Bluetooth' if adv_name
+                         else 'unknown (the station reported no ID)')
+        channel = simpledialog.askinteger(
+            'Set channel (USB)',
+            f"Base station on {port}\nID: {info['uid'] or 'unknown'}\nName: {name_text}\n"
+            f'Current channel: {current_text}\n\n'
+            f'New channel ({CHANNEL_MIN}-{CHANNEL_MAX}):',
+            initialvalue=current if current and CHANNEL_MIN <= current <= CHANNEL_MAX else CHANNEL_MIN,
+            minvalue=CHANNEL_MIN, maxvalue=CHANNEL_MAX, parent=self.root)
+        if channel is None:
+            self.usb_btn.config(state='normal')
+            self.status_var.set('Ready')
+            return
+        self.status_var.set(f'Setting channel {channel} on {port}...')
+        self._show_busy(f'Setting channel {channel}...')
+        threading.Thread(target=self._usb_set_worker, args=(port, channel), daemon=True).start()
+
+    def _show_busy(self, text):
+        """Modal window with a moving bar; blocks the main window until _hide_busy()."""
+        self._hide_busy()
+        win = tk.Toplevel(self.root)
+        win.title('Set channel (USB)')
+        win.transient(self.root)
+        win.resizable(False, False)
+        win.protocol('WM_DELETE_WINDOW', lambda: None)  # can't be closed while waiting
+        ttk.Label(win, text=text).pack(padx=16, pady=(12, 6))
+        bar = ttk.Progressbar(win, mode='indeterminate', length=240)
+        bar.pack(padx=16, pady=(0, 12))
+        bar.start(15)
+        # centre it over the main window
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_height()) // 2
+        win.geometry(f'+{x}+{y}')
+        win.grab_set()
+        self._busy_win = win
+
+    def _hide_busy(self):
+        if self._busy_win:
+            self._busy_win.grab_release()
+            self._busy_win.destroy()
+            self._busy_win = None
+
+    def _usb_set_worker(self, port, channel):
+        try:
+            confirmed = LhUsb(port).set_channel(channel)
+            self.events.put(('usb_set_done', (port, channel, confirmed)))
+        except Exception as e:
+            self.events.put(('usb_failed', str(e)))
 
     # ---- rename / remove --------------------------------------------------------------
     def _rename_selected(self):
@@ -389,10 +511,11 @@ class Lh2Gui:
     def _handle_event(self, kind, payload):
         if kind == 'scan_done':
             new_count = 0
-            for mac in payload:
+            for mac, adv_name in payload:
                 if mac not in self.stations:
                     self.stations[mac] = self._blank_station(mac)
                     new_count += 1
+                self.stations[mac]['adv_name'] = adv_name
             self._refresh_table()
             self.status_var.set(f'Scan complete: {new_count} new station(s) found')
             self.scan_btn.config(state='normal')
@@ -442,11 +565,14 @@ class Lh2Gui:
             self._set_cell(mac, 'status', 'unreachable')
             self.status_var.set(f'{mac}: unreachable ({err})')
         elif kind == 'status_done':
-            mac, mode, power_label, firmware, health = payload
+            mac, adv_name, mode, power_label, firmware, health = payload
             self.busy_macs.discard(mac)
             self._set_cell(mac, 'status', power_label if power_label else 'n/a')
             self._set_cell(mac, 'firmware', firmware)
             self._set_cell(mac, 'health', health)
+            if mac in self.stations:
+                # not shown, but Set Channel (USB) finds the station's row by it
+                self.stations[mac]['adv_name'] = adv_name
             if mode is not None:
                 self._set_cell(mac, 'mode', mode)
             self.status_var.set(f'{mac}: status updated')
@@ -455,6 +581,28 @@ class Lh2Gui:
             self.busy_macs.discard(mac)
             self._set_cell(mac, 'status', 'unreachable')
             self.status_var.set(f'{mac}: status check failed ({err})')
+        elif kind == 'usb_info':
+            self._hide_busy()
+            self._ask_usb_channel(*payload)
+        elif kind == 'usb_set_done':
+            port, channel, confirmed = payload
+            self._hide_busy()
+            self.usb_btn.config(state='normal')
+            if confirmed != channel:
+                self.status_var.set(f'{port}: channel not confirmed')
+                messagebox.showerror('Set channel failed',
+                                     f'Asked for channel {channel}, station reports {confirmed}. Try again.')
+                return
+            self.status_var.set(f'{port}: channel set to {channel}')
+            if self._usb_target_mac in self.stations:
+                # re-read over BLE so the Mode column shows what the station now reports
+                self._get_status_one(self._usb_target_mac)
+            messagebox.showinfo('Channel set', f'Channel {channel} saved on the station.')
+        elif kind == 'usb_failed':
+            self._hide_busy()
+            self.usb_btn.config(state='normal')
+            self.status_var.set('USB: failed')
+            messagebox.showerror('USB base station', payload)
 
 
 def main():
