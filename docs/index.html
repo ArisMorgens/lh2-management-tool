@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lighthouse Stations</title>
+<meta name="description" content="Wake, sleep and check Valve v2 lighthouse base stations over Web Bluetooth.">
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --text: #1b1f24;
+    --muted: #5d6673;
+    --border: #dde1e6;
+    --accent: #2563eb;
+    --accent-text: #ffffff;
+    --ok: #15803d;
+    --warn: #b45309;
+    --bad: #b91c1c;
+    --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111418;
+      --surface: #1a1f25;
+      --text: #e6e9ed;
+      --muted: #9aa4b1;
+      --border: #2c333c;
+      --accent: #5b8def;
+      --accent-text: #0b0e12;
+      --ok: #4ade80;
+      --warn: #fbbf24;
+      --bad: #f87171;
+      --chip: #242b33;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111418;
+    --surface: #1a1f25;
+    --text: #e6e9ed;
+    --muted: #9aa4b1;
+    --border: #2c333c;
+    --accent: #5b8def;
+    --accent-text: #0b0e12;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+    --chip: #242b33;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 16px 16px calc(120px + env(safe-area-inset-bottom));
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  h1 { font-size: 1.25rem; margin: 0; }
+  h2 {
+    font-size: .8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--muted);
+    margin: 20px 0 8px;
+  }
+  button {
+    font: inherit;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.link {
+    border: none;
+    background: none;
+    color: var(--accent);
+    padding: 4px 0;
+    margin-right: 16px;
+    font-size: .9rem;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  .banner {
+    background: var(--surface);
+    border: 1px solid var(--bad);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+  }
+  .banner[hidden] { display: none; }
+  .select-all { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .9rem; }
+  ul.stations { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .card {
+    display: flex;
+    gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+  }
+  .card input[type=checkbox], .select-all input { width: 22px; height: 22px; margin: 2px 0 0; flex: none; accent-color: var(--accent); }
+  .card .main { flex: 1; min-width: 0; }
+  .title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .name { font-weight: 600; }
+  .id { color: var(--muted); font-size: .85rem; font-family: ui-monospace, Menlo, monospace; }
+  .fields { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 2px 10px; font-size: .85rem; }
+  .chip b { font-weight: 500; color: var(--muted); }
+  .chip.ok { color: var(--ok); }
+  .chip.warn { color: var(--warn); }
+  .chip.bad { color: var(--bad); }
+  .fw { margin-top: 6px; color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
+  .row-actions { margin-top: 6px; }
+  .empty { color: var(--muted); font-size: .9rem; padding: 4px 0; }
+  .actions {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  }
+  .actions .inner { max-width: 640px; margin: 0 auto; }
+  .actions .buttons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .actions button { padding: 10px 4px; }
+  #message { font-size: .85rem; color: var(--muted); min-height: 1.2em; margin-bottom: 8px; overflow-wrap: anywhere; }
+  details { margin-top: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; }
+  details + details { margin-top: 8px; }
+  summary { cursor: pointer; font-weight: 600; }
+  details p, details li { font-size: .9rem; color: var(--muted); }
+  dialog {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--surface);
+    color: var(--text);
+    padding: 16px;
+    width: min(400px, calc(100vw - 32px));
+  }
+  dialog::backdrop { background: rgb(0 0 0 / .4); }
+  dialog label { display: block; margin-bottom: 8px; }
+  dialog input {
+    font: inherit;
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+  }
+  dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  .dialog-error { color: var(--bad); font-size: .85rem; min-height: 1.2em; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Lighthouse Stations</h1>
+    <button id="add" class="primary">Add station</button>
+  </header>
+
+  <div id="unsupported" class="banner" hidden></div>
+
+  <label class="select-all"><input type="checkbox" id="select-all"> Select all paired</label>
+
+  <h2>Registered</h2>
+  <ul class="stations" id="registered"></ul>
+
+  <div id="new-section" hidden>
+    <h2>New</h2>
+    <ul class="stations" id="unregistered"></ul>
+  </div>
+
+  <details>
+    <summary>What Mode, Status and Health show</summary>
+    <p>They are read live over Bluetooth, from the station's radio chip. They describe what the radio reports, which isn't always what the station is actually doing.</p>
+    <ul>
+      <li><b>Mode</b> matches the station's channel on radio firmware 2.x. On radio firmware 1.1 (<code>R: 1.1…</code>) it shows a leftover value (e.g. 234); the station still transmits on its correct channel.</li>
+      <li><b>Status "Not set since boot"</b> (radio firmware 1.1 and 2.2): the radio hasn't been told a power state since the station powered up. The station is running; sending Wake or Sleep once gives a real status.</li>
+      <li><b>Health</b> (experimental) is the <code>faults</code> field of the station's info block, 0 on a healthy station. <b>Fault</b> shows the raw value; the individual bits aren't documented. Radio firmware 1.1 doesn't report it (–).</li>
+      <li><b>Identify</b> blinks the station's LED. Not supported on radio firmware 1.1.</li>
+    </ul>
+  </details>
+
+  <details>
+    <summary>Pairing, browsers and backup</summary>
+    <p>Browsers only let a page talk to Bluetooth devices you picked for it. Use <b>Add station</b> to pick a new one, or <b>Pair</b> on a registered station to pick that exact station. Browsers that remember your picks show paired stations straight away next time; others ask again after a reload.</p>
+    <ul>
+      <li><b>iPhone / iPad:</b> Safari can't use Bluetooth. Open this page in the free <b>Bluefy</b> browser.</li>
+      <li><b>Android, Windows, macOS, ChromeOS:</b> Chrome or Edge.</li>
+      <li><b>Linux:</b> Chrome, with <code>chrome://flags/#enable-experimental-web-platform-features</code> enabled.</li>
+    </ul>
+    <p>Names are saved in this browser only, as a name → station ID list in the same format as the desktop tool's <code>stations.json</code>. Export it to move it to another device or back it up.</p>
+    <div class="row-actions">
+      <button class="link" id="export">Export stations.json</button>
+      <button class="link" id="import">Import stations.json</button>
+      <input type="file" id="import-file" accept="application/json,.json" hidden>
+    </div>
+  </details>
+</div>
+
+<div class="actions">
+  <div class="inner">
+    <div id="message"></div>
+    <div class="buttons">
+      <button data-op="wake">Wake</button>
+      <button data-op="sleep">Sleep</button>
+      <button data-op="status">Status</button>
+      <button data-op="identify">Identify</button>
+    </div>
+  </div>
+</div>
+
+<dialog id="name-dialog">
+  <form method="dialog">
+    <label for="name-input" id="name-label">Name</label>
+    <input id="name-input" autocomplete="off">
+    <div class="dialog-error" id="name-error"></div>
+    <div class="buttons">
+      <button type="button" onclick="this.closest('dialog').close('cancel')">Cancel</button>
+      <button value="ok" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+
+// LHv2 GATT layout, same as src/lhv2.py
+const SERVICE = '00001523-1212-efde-1523-785feabcd124';
+const CHAR_POWER = '00001525-1212-efde-1523-785feabcd124';
+const CHAR_MODE = '00001524-1212-efde-1523-785feabcd124';
+const CHAR_IDENTIFY = '00008421-1212-efde-1523-785feabcd124';
+// Base station info block (OOTX frame), only on radio firmware 2.x
+const INFO_SERVICE = '00000000-0060-7990-5544-1cce81af42f0';
+const CHAR_INFO = '00000010-0060-7990-5544-1cce81af42f0';
+const INFO_FAULTS_OFFSET = 32;  // 'faults': fault flags, 0 when the station is healthy
+const DEVICE_INFO_SERVICE = 'device_information';
+const CHAR_FIRMWARE = 'firmware_revision_string';
+// Web Bluetooth only lets the page use services listed when the station is picked
+const OPTIONAL_SERVICES = [SERVICE, INFO_SERVICE, DEVICE_INFO_SERVICE];
+
+const POWER_ON = 0x01;
+const POWER_OFF = 0x00;
+// 0x01/0x09/0x0b all mean awake, differing only in which state preceded it
+const POWER_STATE_LABELS = { 0x00: 'Sleeping', 0x01: 'Awake', 0x02: 'Standby', 0x09: 'Awake', 0x0b: 'Awake' };
+
+const TRY_COUNT = 3;
+const TRY_PAUSE_MS = 2000;
+const CONNECT_TIMEOUT_MS = 10000;
+const STORE_KEY = 'lh2-stations';
+
+class IdentifyNotSupported extends Error {}
+
+// ---- registry: name -> {id}, same format as src/stations.json -------------------
+function loadRegistry() {
+  try {
+    const data = JSON.parse(localStorage.getItem(STORE_KEY));
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveRegistry(reg) {
+  const sorted = Object.fromEntries(Object.keys(reg).sort().map(k => [k, reg[k]]));
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(sorted));
+  } catch {
+    say('Could not save names in this browser; export them to keep them.');
+  }
+}
+
+// ---- station state ----------------------------------------------------------------
+// station ID -> {id, name, device, mode, status, health, firmware, selected};
+// name null: unregistered, device null: not paired in this browser
+const stations = new Map();
+
+function station(id) {
+  if (!stations.has(id)) {
+    stations.set(id, { id, name: null, device: null, mode: null, status: null,
+                       health: null, firmware: null, selected: false });
+  }
+  return stations.get(id);
+}
+
+function idFromBleName(name) {
+  return name && name.toUpperCase().startsWith('LHB-') ? name.slice(4).toUpperCase() : null;
+}
+
+function label(st) {
+  return st.name || `LHB-${st.id}`;
+}
+
+function applyRegistry() {
+  for (const st of stations.values()) st.name = null;
+  for (const [name, info] of Object.entries(loadRegistry())) {
+    if (info && typeof info.id === 'string') station(info.id.toUpperCase()).name = name;
+  }
+  // forget stations that are neither registered nor paired
+  for (const [id, st] of stations) {
+    if (!st.name && !st.device) stations.delete(id);
+  }
+}
+
+// ---- Bluetooth --------------------------------------------------------------------
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function decodePowerState(view) {
+  if (!view || view.byteLength === 0) return 'Unknown';
+  const b = view.getUint8(0);
+  // Seen on radio firmware 1.1 and 2.2: after power-up the characteristic holds an
+  // arbitrary byte until the first power write
+  return POWER_STATE_LABELS[b] ?? `Not set since boot (0x${b.toString(16).padStart(2, '0')})`;
+}
+
+function healthLabel(faults) {
+  if (faults === null) return '–';
+  return faults === 0 ? 'OK' : `Fault (0x${faults.toString(16).padStart(2, '0')})`;
+}
+
+async function connect(device) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('connection timed out')), CONNECT_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([device.gatt.connect(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Connect (retrying like the desktop tool), run fn(server), always disconnect
+async function withStation(st, fn) {
+  let server;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      server = await connect(st.device);
+      break;
+    } catch (e) {
+      st.device.gatt.disconnect();
+      if (attempt >= TRY_COUNT) throw e;
+      await sleep(TRY_PAUSE_MS);
+    }
+  }
+  try {
+    return await fn(server);
+  } finally {
+    st.device.gatt.disconnect();
+  }
+}
+
+// The characteristic, or null if the station's firmware doesn't have it
+async function findChar(server, service, uuid) {
+  try {
+    return await (await server.getPrimaryService(service)).getCharacteristic(uuid);
+  } catch (e) {
+    if (e.name === 'NotFoundError') return null;
+    throw e;
+  }
+}
+
+function writeByte(charc, byte) {
+  const data = Uint8Array.of(byte);
+  return charc.writeValueWithResponse ? charc.writeValueWithResponse(data) : charc.writeValue(data);
+}
+
+async function readPowerLabel(server) {
+  try {
+    return decodePowerState(await (await findChar(server, SERVICE, CHAR_POWER)).readValue());
+  } catch {
+    return null;  // write-only on some firmware
+  }
+}
+
+async function readFirmware(server) {
+  try {
+    const charc = await findChar(server, DEVICE_INFO_SERVICE, CHAR_FIRMWARE);
+    if (!charc) return null;
+    const text = new TextDecoder().decode(await charc.readValue());
+    // some firmware separates the R/M/B fields with newlines instead of commas
+    return text.split(/\r?\n/).map(s => s.trim()).filter(Boolean).join(', ');
+  } catch {
+    return null;
+  }
+}
+
+async function readFaults(server) {
+  try {
+    const charc = await findChar(server, INFO_SERVICE, CHAR_INFO);
+    if (!charc) return null;  // radio firmware 1.1
+    const view = await charc.readValue();
+    return view.byteLength > INFO_FAULTS_OFFSET ? view.getUint8(INFO_FAULTS_OFFSET) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Each returns the text for the message line; they update st in place
+const OPS = {
+  async status(st, server) {
+    const power = await readPowerLabel(server);
+    st.firmware = await readFirmware(server);
+    const mode = await (await findChar(server, SERVICE, CHAR_MODE)).readValue();
+    if (mode.byteLength) st.mode = mode.getUint8(0);
+    st.health = healthLabel(await readFaults(server));
+    st.status = power || 'n/a';
+    return 'status updated';
+  },
+  async wake(st, server) {
+    await writeByte(await findChar(server, SERVICE, CHAR_POWER), POWER_ON);
+    st.status = await readPowerLabel(server);
+    return 'woken';
+  },
+  async sleep(st, server) {
+    // Documented sleep sequence is wake (0x01) then sleep (0x00) as two separate writes:
+    // https://gist.github.com/BenWoodford/3a1e500a4ea2673525f5adb4120fd47c
+    const charc = await findChar(server, SERVICE, CHAR_POWER);
+    await writeByte(charc, POWER_ON);
+    await writeByte(charc, POWER_OFF);
+    st.status = await readPowerLabel(server);
+    return 'put to sleep';
+  },
+  async identify(st, server) {
+    const charc = await findChar(server, SERVICE, CHAR_IDENTIFY);
+    if (!charc) throw new IdentifyNotSupported('identify not supported on this firmware');
+    await writeByte(charc, 0x01);
+    return 'identify sent';
+  },
+};
+
+const PROGRESS = { status: 'checking…', wake: 'Waking…', sleep: 'Going to sleep…', identify: 'Identifying…' };
+
+// One station at a time: phone Bluetooth stacks don't cope well with many
+// simultaneous connections
+let queue = Promise.resolve();
+const queued = new Set();  // IDs with an operation waiting or running
+
+function enqueue(st, op) {
+  if (queued.has(st.id)) return;
+  queued.add(st.id);
+  const before = st.status;
+  st.status = 'queued';
+  render();
+  queue = queue.then(async () => {
+    st.status = PROGRESS[op];
+    render();
+    try {
+      const done = await withStation(st, server => OPS[op](st, server));
+      if (st.status === PROGRESS[op] || st.status === null) st.status = before;
+      say(`${label(st)}: ${done}`);
+    } catch (e) {
+      if (e instanceof IdentifyNotSupported) {
+        st.status = before;
+        say(`${label(st)}: ${e.message}`);
+      } else {
+        st.status = 'unreachable';
+        say(`${label(st)}: unreachable (${e.message})`);
+      }
+    }
+    queued.delete(st.id);
+    render();
+  });
+}
+
+async function pick(filter) {
+  try {
+    return await navigator.bluetooth.requestDevice({ filters: [filter], optionalServices: OPTIONAL_SERVICES });
+  } catch (e) {
+    if (e.name !== 'NotFoundError') say(`Bluetooth: ${e.message}`);  // NotFoundError: chooser cancelled
+    return null;
+  }
+}
+
+function attach(device) {
+  const id = idFromBleName(device.name);
+  if (!id) return null;
+  const st = station(id);
+  st.device = device;
+  return st;
+}
+
+async function addStation() {
+  const device = await pick({ namePrefix: 'LHB-' });
+  if (!device) return;
+  const st = attach(device);
+  if (!st) {
+    say(`${device.name || 'That device'} is not a base station`);
+    return;
+  }
+  st.selected = true;
+  render();
+  if (!st.name) await registerStation(st);
+  enqueue(st, 'status');
+}
+
+async function pairStation(st) {
+  // only offer this exact station in the chooser
+  const device = await pick({ name: `LHB-${st.id}` });
+  if (!device) return;
+  attach(device);
+  st.selected = true;
+  enqueue(st, 'status');
+}
+
+// ---- names ------------------------------------------------------------------------
+const nameDialog = document.getElementById('name-dialog');
+const nameInput = document.getElementById('name-input');
+const nameError = document.getElementById('name-error');
+
+// Resolves to the entered name, or null if cancelled. validate(name) returns an
+// error text, or null if the name is fine.
+function askName(title, initial, validate) {
+  document.getElementById('name-label').textContent = title;
+  nameInput.value = initial;
+  nameError.textContent = '';
+  nameDialog.returnValue = '';
+  nameDialog.showModal();
+  return new Promise(resolve => {
+    const onClose = () => {
+      if (nameDialog.returnValue === 'ok') {
+        const name = nameInput.value.trim();
+        const err = validate(name);
+        if (err) {
+          nameError.textContent = err;
+          nameDialog.returnValue = '';
+          nameDialog.showModal();
+          return;
+        }
+        nameDialog.removeEventListener('close', onClose);
+        resolve(name);
+      } else {
+        nameDialog.removeEventListener('close', onClose);
+        resolve(null);
+      }
+    };
+    nameDialog.addEventListener('close', onClose);
+  });
+}
+
+function checkName(name, id) {
+  if (!name) return 'Enter a name';
+  const info = loadRegistry()[name];
+  return info && info.id !== id ? `"${name}" is already used by LHB-${info.id}` : null;
+}
+
+async function registerStation(st) {
+  const name = await askName(`Name for LHB-${st.id}`, '', n => checkName(n, st.id));
+  if (!name) return;
+  const reg = loadRegistry();
+  reg[name] = { id: st.id };
+  saveRegistry(reg);
+  applyRegistry();
+  render();
+  say(`Registered ${name}`);
+}
+
+async function renameStation(st) {
+  const old = st.name;
+  const name = await askName(`Rename ${old}`, old, n => checkName(n, st.id));
+  if (!name || name === old) return;
+  const reg = loadRegistry();
+  reg[name] = reg[old];
+  delete reg[old];
+  saveRegistry(reg);
+  applyRegistry();
+  render();
+}
+
+function removeStation(st) {
+  if (!confirm(`Remove ${st.name} and forget its name?`)) return;
+  const reg = loadRegistry();
+  delete reg[st.name];
+  saveRegistry(reg);
+  applyRegistry();
+  render();
+}
+
+function exportRegistry() {
+  const reg = loadRegistry();
+  const sorted = Object.fromEntries(Object.keys(reg).sort().map(k => [k, reg[k]]));
+  const blob = new Blob([JSON.stringify(sorted, null, 2) + '\n'], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'stations.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function importRegistry(file) {
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch {
+    say(`${file.name} is not valid JSON`);
+    return;
+  }
+  const reg = loadRegistry();
+  let count = 0;
+  for (const [name, info] of Object.entries(data && typeof data === 'object' ? data : {})) {
+    if (!info || typeof info.id !== 'string') continue;
+    const id = info.id.toUpperCase();
+    // a station has only one name: drop the one it had here
+    for (const [n, i] of Object.entries(reg)) if (i.id.toUpperCase() === id) delete reg[n];
+    reg[name] = { id };
+    count++;
+  }
+  saveRegistry(reg);
+  applyRegistry();
+  render();
+  say(`Imported ${count} station(s)`);
+}
+
+// ---- UI ---------------------------------------------------------------------------
+const messageEl = document.getElementById('message');
+
+function say(text) {
+  messageEl.textContent = text;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function statusClass(status) {
+  if (status === 'Awake') return 'ok';
+  if (status === 'unreachable') return 'bad';
+  if (status && status.startsWith('Not set')) return 'warn';
+  return '';
+}
+
+function healthClass(health) {
+  if (health === 'OK') return 'ok';
+  if (health && health.startsWith('Fault')) return 'bad';
+  return '';
+}
+
+function chip(name, value, cls = '') {
+  return `<span class="chip ${cls}"><b>${name}</b> ${esc(value ?? '–')}</span>`;
+}
+
+function cardHtml(st) {
+  const paired = !!st.device;
+  const actions = [];
+  if (!paired) actions.push('<button class="link" data-act="pair">Pair</button>');
+  if (st.name) {
+    actions.push('<button class="link" data-act="rename">Rename</button>');
+    actions.push('<button class="link" data-act="remove">Remove</button>');
+  } else {
+    actions.push('<button class="link" data-act="register">Register</button>');
+  }
+  const status = paired ? st.status : 'Not paired in this browser';
+  return `<li class="card" data-id="${esc(st.id)}">
+    <input type="checkbox" data-act="select" aria-label="Select ${esc(label(st))}"
+           ${st.selected && paired ? 'checked' : ''} ${paired ? '' : 'disabled'}>
+    <div class="main">
+      <div class="title"><span class="name">${esc(label(st))}</span><span class="id">${esc(st.id)}</span></div>
+      <div class="fields">
+        ${chip('Mode', st.mode)}
+        ${chip('Status', status, statusClass(status))}
+        ${chip('Health', st.health, healthClass(st.health))}
+      </div>
+      ${st.firmware ? `<div class="fw">${esc(st.firmware)}</div>` : ''}
+      <div class="row-actions">${actions.join('')}</div>
+    </div>
+  </li>`;
+}
+
+function render() {
+  const all = [...stations.values()];
+  const registered = all.filter(st => st.name)
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const unregistered = all.filter(st => !st.name).sort((a, b) => a.id.localeCompare(b.id));
+  document.getElementById('registered').innerHTML = registered.length
+    ? registered.map(cardHtml).join('')
+    : '<li class="empty">No stations yet. Tap <b>Add station</b> to pick one nearby.</li>';
+  document.getElementById('unregistered').innerHTML = unregistered.map(cardHtml).join('');
+  document.getElementById('new-section').hidden = unregistered.length === 0;
+
+  const paired = all.filter(st => st.device);
+  const selected = paired.filter(st => st.selected);
+  const selectAll = document.getElementById('select-all');
+  selectAll.checked = paired.length > 0 && selected.length === paired.length;
+  selectAll.disabled = paired.length === 0;
+  for (const btn of document.querySelectorAll('[data-op]')) btn.disabled = selected.length === 0;
+}
+
+function onListClick(event) {
+  const card = event.target.closest('.card');
+  const act = event.target.dataset.act;
+  if (!card || !act) return;
+  const st = stations.get(card.dataset.id);
+  if (act === 'select') {
+    st.selected = event.target.checked;
+    render();
+  } else if (act === 'pair') {
+    pairStation(st);
+  } else if (act === 'register') {
+    registerStation(st);
+  } else if (act === 'rename') {
+    renameStation(st);
+  } else if (act === 'remove') {
+    removeStation(st);
+  }
+}
+
+async function init() {
+  applyRegistry();
+  render();
+  document.getElementById('registered').addEventListener('click', onListClick);
+  document.getElementById('unregistered').addEventListener('click', onListClick);
+  document.getElementById('select-all').addEventListener('change', e => {
+    for (const st of stations.values()) if (st.device) st.selected = e.target.checked;
+    render();
+  });
+  for (const btn of document.querySelectorAll('[data-op]')) {
+    btn.addEventListener('click', () => {
+      for (const st of stations.values()) if (st.device && st.selected) enqueue(st, btn.dataset.op);
+    });
+  }
+  document.getElementById('export').addEventListener('click', exportRegistry);
+  const importFile = document.getElementById('import-file');
+  document.getElementById('import').addEventListener('click', () => importFile.click());
+  importFile.addEventListener('change', () => {
+    if (importFile.files[0]) importRegistry(importFile.files[0]);
+    importFile.value = '';
+  });
+
+  const banner = document.getElementById('unsupported');
+  if (!navigator.bluetooth) {
+    banner.innerHTML = window.isSecureContext
+      ? 'This browser can\'t use Bluetooth. On iPhone or iPad, open this page in the <b>Bluefy</b> browser; elsewhere use Chrome or Edge.'
+      : 'Bluetooth only works on pages served over HTTPS (or from localhost).';
+    banner.hidden = false;
+    document.getElementById('add').disabled = true;
+    return;
+  }
+  document.getElementById('add').addEventListener('click', addStation);
+  try {
+    if (navigator.bluetooth.getAvailability && !(await navigator.bluetooth.getAvailability())) {
+      banner.textContent = 'Bluetooth is off or unavailable on this device.';
+      banner.hidden = false;
+    }
+  } catch {}
+
+  // stations picked in earlier visits, in browsers that remember them
+  if (navigator.bluetooth.getDevices) {
+    try {
+      for (const device of await navigator.bluetooth.getDevices()) attach(device);
+    } catch {}
+  }
+  render();
+  // like the desktop tool's startup scan: refresh the registered stations
+  for (const st of stations.values()) if (st.name && st.device) enqueue(st, 'status');
+}
+
+init();
+</script>
+</body>
+</html>
