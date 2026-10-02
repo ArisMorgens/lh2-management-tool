@@ -151,7 +151,13 @@
     width: min(400px, calc(100vw - 32px));
   }
   dialog::backdrop { background: rgb(0 0 0 / .4); }
-  dialog label { display: block; margin-bottom: 8px; }
+  dialog label { display: block; margin: 12px 0 6px; font-size: .9rem; color: var(--muted); }
+  .dialog-title { font-weight: 600; }
+  .dialog-channel { font-size: 1.5rem; font-weight: 600; margin-top: 8px; }
+  .dialog-channel:empty { display: none; }
+  .dialog-info { color: var(--muted); font-size: .85rem; margin-top: 4px; }
+  #name-identify-row { margin-top: 8px; }
+  #name-identify-row[hidden] { display: none; }
   dialog input {
     font: inherit;
     width: 100%;
@@ -169,7 +175,7 @@
 <div class="wrap">
   <header>
     <h1>Lighthouse Stations</h1>
-    <button id="add" class="primary">Add station</button>
+    <button id="add" class="primary">Add stations</button>
   </header>
 
   <div id="unsupported" class="banner" hidden></div>
@@ -197,7 +203,7 @@
 
   <details>
     <summary>Pairing, browsers and backup</summary>
-    <p>Browsers only let a page talk to Bluetooth devices you picked for it. Use <b>Add station</b> to pick a new one, or <b>Pair</b> on a registered station to pick that exact station. Browsers that remember your picks show paired stations straight away next time; others ask again after a reload.</p>
+    <p>Browsers only let a page talk to Bluetooth devices you picked for it, one at a time. Use <b>Add stations</b> to pick a new one; after naming it, <b>Save &amp; add next</b> opens the list again for the next one. <b>Pair</b> on a registered station picks that exact station. Browsers that remember your picks show paired stations straight away next time; others ask again after a reload.</p>
     <ul>
       <li><b>iPhone / iPad:</b> Safari can't use Bluetooth. Open this page in the free <b>Bluefy</b> browser.</li>
       <li><b>Android, Windows, macOS, ChromeOS:</b> Chrome or Edge.</li>
@@ -225,15 +231,21 @@
 </div>
 
 <dialog id="name-dialog">
-  <form method="dialog">
-    <label for="name-input" id="name-label">Name</label>
-    <input id="name-input" autocomplete="off">
-    <div class="dialog-error" id="name-error"></div>
-    <div class="buttons">
-      <button type="button" onclick="this.closest('dialog').close('cancel')">Cancel</button>
-      <button value="ok" class="primary">Save</button>
-    </div>
-  </form>
+  <div class="dialog-title" id="name-title"></div>
+  <div class="dialog-channel" id="name-channel"></div>
+  <div class="dialog-info" id="name-info"></div>
+  <div class="row-actions" id="name-identify-row">
+    <button type="button" class="link" id="name-identify">Identify (blink LED)</button>
+    <span class="dialog-info" id="name-note"></span>
+  </div>
+  <label for="name-input">Name</label>
+  <input id="name-input" autocomplete="off" enterkeyhint="done">
+  <div class="dialog-error" id="name-error"></div>
+  <div class="buttons">
+    <button type="button" id="name-cancel">Cancel</button>
+    <button type="button" id="name-save">Save</button>
+    <button type="button" id="name-next" class="primary">Save &amp; add next</button>
+  </div>
 </dialog>
 
 <script>
@@ -285,16 +297,34 @@ function saveRegistry(reg) {
 }
 
 // ---- station state ----------------------------------------------------------------
-// station ID -> {id, name, device, mode, status, health, firmware, selected};
-// name null: unregistered, device null: not paired in this browser
+// station ID -> {id, name, device, mode, status, health, firmware, activity, selected};
+// name null: unregistered, device null: not paired in this browser,
+// activity: what's being done to it right now, shown instead of status
 const stations = new Map();
 
 function station(id) {
   if (!stations.has(id)) {
     stations.set(id, { id, name: null, device: null, mode: null, status: null,
-                       health: null, firmware: null, selected: false });
+                       health: null, firmware: null, activity: null, selected: false });
   }
   return stations.get(id);
+}
+
+// Major version of the radio firmware ("R: 2.9..." -> 2), or null if not read yet
+function radioMajor(st) {
+  const m = /R:\s*(\d+)\./.exec(st.firmware || '');
+  return m ? Number(m[1]) : null;
+}
+
+// What the station says about its channel, for the name dialog
+function describeChannel(st) {
+  if (radioMajor(st) === 1) {
+    return { info: 'Radio firmware 1.1 doesn\'t reliably report its channel over Bluetooth, and can\'t ' +
+                   'blink its LED. The desktop tool can read the channel over USB.' };
+  }
+  if (st.mode >= 1 && st.mode <= 16) return { channel: st.mode, info: `Station ID ${st.id}` };
+  if (st.status === 'unreachable') return { info: 'Couldn\'t reach the station to read its channel.' };
+  return { info: 'Channel not known.' };
 }
 
 function idFromBleName(name) {
@@ -423,7 +453,7 @@ const OPS = {
   },
   async wake(st, server) {
     await writeByte(await findChar(server, SERVICE, CHAR_POWER), POWER_ON);
-    st.status = await readPowerLabel(server);
+    st.status = (await readPowerLabel(server)) ?? st.status;
     return 'woken';
   },
   async sleep(st, server) {
@@ -432,7 +462,7 @@ const OPS = {
     const charc = await findChar(server, SERVICE, CHAR_POWER);
     await writeByte(charc, POWER_ON);
     await writeByte(charc, POWER_OFF);
-    st.status = await readPowerLabel(server);
+    st.status = (await readPowerLabel(server)) ?? st.status;
     return 'put to sleep';
   },
   async identify(st, server) {
@@ -448,39 +478,47 @@ const PROGRESS = { status: 'checking…', wake: 'Waking…', sleep: 'Going to sl
 // One station at a time: phone Bluetooth stacks don't cope well with many
 // simultaneous connections
 let queue = Promise.resolve();
-const queued = new Set();  // IDs with an operation waiting or running
+const pending = new Map();  // "<id> <op>" -> promise of that operation, while waiting or running
 
+// Queue op on the station; resolves to the result text (also shown in the message line)
 function enqueue(st, op) {
-  if (queued.has(st.id)) return;
-  queued.add(st.id);
-  const before = st.status;
-  st.status = 'queued';
+  const key = `${st.id} ${op}`;
+  if (pending.has(key)) return pending.get(key);
+  st.activity = st.activity || 'queued';
   render();
-  queue = queue.then(async () => {
-    st.status = PROGRESS[op];
+  const run = queue.then(async () => {
+    st.activity = PROGRESS[op];
     render();
+    let msg;
     try {
-      const done = await withStation(st, server => OPS[op](st, server));
-      if (st.status === PROGRESS[op] || st.status === null) st.status = before;
-      say(`${label(st)}: ${done}`);
+      msg = `${label(st)}: ${await withStation(st, server => OPS[op](st, server))}`;
     } catch (e) {
       if (e instanceof IdentifyNotSupported) {
-        st.status = before;
-        say(`${label(st)}: ${e.message}`);
+        msg = `${label(st)}: ${e.message}`;
       } else {
         st.status = 'unreachable';
-        say(`${label(st)}: unreachable (${e.message})`);
+        msg = `${label(st)}: unreachable (${e.message})`;
       }
     }
-    queued.delete(st.id);
+    pending.delete(key);
+    st.activity = [...pending.keys()].some(k => k.startsWith(`${st.id} `)) ? 'queued' : null;
+    say(msg);
     render();
+    return msg;
   });
+  pending.set(key, run);
+  queue = run;
+  return run;
 }
 
-async function pick(filter) {
+async function pick(filter, exclude = []) {
+  const options = { filters: [filter], optionalServices: OPTIONAL_SERVICES };
+  // leaves stations that are already paired out of the chooser (Chrome 114+)
+  if (exclude.length) options.exclusionFilters = exclude.map(id => ({ name: `LHB-${id}` }));
   try {
-    return await navigator.bluetooth.requestDevice({ filters: [filter], optionalServices: OPTIONAL_SERVICES });
+    return await navigator.bluetooth.requestDevice(options);
   } catch (e) {
+    if (e.name === 'TypeError' && options.exclusionFilters) return pick(filter);
     if (e.name !== 'NotFoundError') say(`Bluetooth: ${e.message}`);  // NotFoundError: chooser cancelled
     return null;
   }
@@ -494,18 +532,27 @@ function attach(device) {
   return st;
 }
 
-async function addStation() {
-  const device = await pick({ namePrefix: 'LHB-' });
-  if (!device) return;
-  const st = attach(device);
-  if (!st) {
-    say(`${device.name || 'That device'} is not a base station`);
-    return;
+// Pick a station, read it, name it; "Save & add next" repeats with the stations
+// not picked yet. Browsers need a tap for every chooser, which that button provides.
+async function addStations() {
+  for (;;) {
+    const paired = [...stations.values()].filter(st => st.device).map(st => st.id);
+    const device = await pick({ namePrefix: 'LHB-' }, paired);
+    if (!device) return;
+    const st = attach(device);
+    if (!st) {
+      say(`${device.name || 'That device'} is not a base station`);
+      return;
+    }
+    st.selected = true;
+    render();
+    if (st.name) {
+      enqueue(st, 'status');
+      return;
+    }
+    const result = await registerStation(st, true);
+    if (!result || !result.next) return;
   }
-  st.selected = true;
-  render();
-  if (!st.name) await registerStation(st);
-  enqueue(st, 'status');
 }
 
 async function pairStation(st) {
@@ -518,37 +565,64 @@ async function pairStation(st) {
 }
 
 // ---- names ------------------------------------------------------------------------
-const nameDialog = document.getElementById('name-dialog');
-const nameInput = document.getElementById('name-input');
-const nameError = document.getElementById('name-error');
+const $ = id => document.getElementById(id);
+const nameDialog = $('name-dialog');
+const nameInput = $('name-input');
 
-// Resolves to the entered name, or null if cancelled. validate(name) returns an
-// error text, or null if the name is fine.
-function askName(title, initial, validate) {
-  document.getElementById('name-label').textContent = title;
+// Ask for a station's name, showing its channel and offering Identify. Resolves to
+// {name, next} (next: "Save & add next" was tapped), or null if cancelled.
+async function askName(st, title, initial, offerNext) {
+  // read the channel first if this session hasn't yet
+  if (st.device && st.firmware === null && st.status !== 'unreachable') await enqueue(st, 'status');
+  const { channel, info } = describeChannel(st);
+  if (!initial && channel && !loadRegistry()[`Channel ${channel}`]) initial = `Channel ${channel}`;
+  $('name-title').textContent = title;
+  $('name-channel').textContent = channel ? `Channel ${channel}` : '';
+  $('name-info').textContent = info;
+  $('name-identify-row').hidden = !st.device || radioMajor(st) === 1;
+  $('name-note').textContent = '';
+  $('name-error').textContent = '';
+  $('name-next').hidden = !offerNext;
+  $('name-save').className = offerNext ? '' : 'primary';
   nameInput.value = initial;
-  nameError.textContent = '';
-  nameDialog.returnValue = '';
   nameDialog.showModal();
+
   return new Promise(resolve => {
-    const onClose = () => {
-      if (nameDialog.returnValue === 'ok') {
-        const name = nameInput.value.trim();
-        const err = validate(name);
-        if (err) {
-          nameError.textContent = err;
-          nameDialog.returnValue = '';
-          nameDialog.showModal();
-          return;
-        }
-        nameDialog.removeEventListener('close', onClose);
-        resolve(name);
-      } else {
-        nameDialog.removeEventListener('close', onClose);
-        resolve(null);
-      }
+    const finish = result => {
+      for (const [el, type, fn] of handlers) el.removeEventListener(type, fn);
+      nameDialog.close();
+      resolve(result);
     };
-    nameDialog.addEventListener('close', onClose);
+    const submit = next => {
+      const name = nameInput.value.trim();
+      const err = checkName(name, st.id);
+      if (err) {
+        $('name-error').textContent = err;
+        return;
+      }
+      finish({ name, next });
+    };
+    const identify = async () => {
+      $('name-identify').disabled = true;
+      $('name-note').textContent = 'sending…';
+      const msg = await enqueue(st, 'identify');
+      $('name-note').textContent = msg.endsWith('identify sent') ? 'LED blinking' : msg;
+      $('name-identify').disabled = false;
+    };
+    const handlers = [
+      [$('name-save'), 'click', () => submit(false)],
+      [$('name-next'), 'click', () => submit(true)],
+      [$('name-cancel'), 'click', () => finish(null)],
+      [$('name-identify'), 'click', identify],
+      [nameDialog, 'cancel', e => { e.preventDefault(); finish(null); }],  // Escape key
+      [nameInput, 'keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submit(offerNext);
+        }
+      }],
+    ];
+    for (const [el, type, fn] of handlers) el.addEventListener(type, fn);
   });
 }
 
@@ -558,23 +632,25 @@ function checkName(name, id) {
   return info && info.id !== id ? `"${name}" is already used by LHB-${info.id}` : null;
 }
 
-async function registerStation(st) {
-  const name = await askName(`Name for LHB-${st.id}`, '', n => checkName(n, st.id));
-  if (!name) return;
+// Resolves to askName's result
+async function registerStation(st, offerNext = false) {
+  const result = await askName(st, `New station LHB-${st.id}`, '', offerNext);
+  if (!result) return null;
   const reg = loadRegistry();
-  reg[name] = { id: st.id };
+  reg[result.name] = { id: st.id };
   saveRegistry(reg);
   applyRegistry();
   render();
-  say(`Registered ${name}`);
+  say(`Registered ${result.name}`);
+  return result;
 }
 
 async function renameStation(st) {
   const old = st.name;
-  const name = await askName(`Rename ${old}`, old, n => checkName(n, st.id));
-  if (!name || name === old) return;
+  const result = await askName(st, `Rename ${old}`, old, false);
+  if (!result || result.name === old) return;
   const reg = loadRegistry();
-  reg[name] = reg[old];
+  reg[result.name] = reg[old];
   delete reg[old];
   saveRegistry(reg);
   applyRegistry();
@@ -663,7 +739,7 @@ function cardHtml(st) {
   } else {
     actions.push('<button class="link" data-act="register">Register</button>');
   }
-  const status = paired ? st.status : 'Not paired in this browser';
+  const status = paired ? st.activity || st.status : 'Not paired in this browser';
   return `<li class="card" data-id="${esc(st.id)}">
     <input type="checkbox" data-act="select" aria-label="Select ${esc(label(st))}"
            ${st.selected && paired ? 'checked' : ''} ${paired ? '' : 'disabled'}>
@@ -687,7 +763,7 @@ function render() {
   const unregistered = all.filter(st => !st.name).sort((a, b) => a.id.localeCompare(b.id));
   document.getElementById('registered').innerHTML = registered.length
     ? registered.map(cardHtml).join('')
-    : '<li class="empty">No stations yet. Tap <b>Add station</b> to pick one nearby.</li>';
+    : '<li class="empty">No stations yet. Tap <b>Add stations</b> to pick the ones nearby.</li>';
   document.getElementById('unregistered').innerHTML = unregistered.map(cardHtml).join('');
   document.getElementById('new-section').hidden = unregistered.length === 0;
 
@@ -743,13 +819,14 @@ async function init() {
   const banner = document.getElementById('unsupported');
   if (!navigator.bluetooth) {
     banner.innerHTML = window.isSecureContext
-      ? 'This browser can\'t use Bluetooth. On iPhone or iPad, open this page in the <b>Bluefy</b> browser; elsewhere use Chrome or Edge.'
+      ? 'This browser can\'t use Bluetooth. On iPhone or iPad, open this page in the <b>Bluefy</b> browser; elsewhere use Chrome or Edge (Firefox and Safari don\'t support Bluetooth). '
+        + 'On Linux, Chrome/Chromium also needs <code>chrome://flags/#enable-experimental-web-platform-features</code> enabled.'
       : 'Bluetooth only works on pages served over HTTPS (or from localhost).';
     banner.hidden = false;
     document.getElementById('add').disabled = true;
     return;
   }
-  document.getElementById('add').addEventListener('click', addStation);
+  document.getElementById('add').addEventListener('click', addStations);
   try {
     if (navigator.bluetooth.getAvailability && !(await navigator.bluetooth.getAvailability())) {
       banner.textContent = 'Bluetooth is off or unavailable on this device.';
