@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-JSON-backed registry mapping station names to MAC addresses.
+JSON-backed registry mapping station names to station IDs.
+
+The ID is the part after "LHB-" in the station's Bluetooth name (also what its
+USB console reports as the serial number). Unlike the MAC address it's visible
+on every platform (iOS hides MACs), so the file can be shared between devices.
 Nothing else is stored; everything else is read live from the stations.
 """
 
@@ -26,9 +30,9 @@ def all():
     return load()
 
 
-def add(name, mac):
+def add(name, station_id):
     data = load()
-    data[name] = {'mac': mac}
+    data[name] = {'id': station_id}
     save(data)
 
 

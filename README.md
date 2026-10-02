@@ -34,6 +34,8 @@ python3 src/lh2gui.py
 
 Click **Scan** to find nearby base stations (`LHB-*`), select one and click **Register** to give it a name, then use **Wake** / **Sleep** / **Get Status** / **Identify** on any selected station(s).
 
+Registered names are saved in `src/stations.json` together with each station's ID (the part after `LHB-` in its Bluetooth name). At startup a short scan finds which registered stations are on and their MAC addresses; stations that aren't heard are shown as **not found** without trying to connect.
+
 **Set Channel (USB)...** sets the channel of a single base station plugged in with a USB data cable, and checks that the station confirms saving it. Its Mode is re-read over Bluetooth after the channel is set.
 
 ### What the Mode, Status and Health columns show
