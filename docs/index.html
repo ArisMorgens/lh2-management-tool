@@ -768,8 +768,6 @@ async function init() {
     } catch {}
   }
   render();
-  // like the desktop tool's startup scan: refresh the registered stations
-  for (const st of stations.values()) if (st.name && st.device) enqueue(st, 'status');
 }
 
 init();
