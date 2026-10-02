@@ -46,6 +46,24 @@ COLUMN_TOOLTIPS = {
         "individual bits mean isn't documented.\n\n"
         "Radio firmware 1.1 stations don't report it (–)."),
 }
+# Shown when hovering a button, keyed by its label
+BUTTON_TOOLTIPS = {
+    'Scan': "Search for base stations nearby (about 8 s). New ones are listed below "
+            "the line, ready to register.",
+    'Wake': "Wake the selected stations: the rotor spins up and the lasers turn on.",
+    'Sleep': "Put the selected stations to sleep: the lasers turn off and the rotor "
+             "spins down.",
+    'Get Status': "Read the selected stations' mode, firmware, power state and health "
+                  "over Bluetooth.",
+    'Identify': "Make the selected stations' LED blink so you can find them. Not "
+                "supported on radio firmware 1.1.",
+    'Register': "Give the selected new station a name. Only names are saved; "
+                "everything else is read live from the station.",
+    'Rename': "Change the name of the selected registered station.",
+    'Remove': "Remove the selected stations from the list and forget their names.",
+    'Set Channel (USB)...': "Set the channel of the base station connected to this "
+                            "computer with a USB data cable. Connect one station at a time.",
+}
 TOOLTIP_WRAP = 380
 
 
@@ -104,6 +122,9 @@ class Lh2Gui:
         ttk.Separator(btns).pack(fill='x', pady=6)
         self.usb_btn = ttk.Button(btns, text='Set Channel (USB)...', command=self._start_usb_channel)
         self.usb_btn.pack(fill='x', pady=2)
+        for btn in btns.winfo_children():
+            if isinstance(btn, ttk.Button):
+                self._add_tooltip(btn, BUTTON_TOOLTIPS[btn.cget('text')])
 
         self.scan_progress = ttk.Progressbar(self.root, mode='determinate', maximum=100)
         self.scan_progress.pack(fill='x', padx=8)
@@ -111,17 +132,27 @@ class Lh2Gui:
         self.status_var = tk.StringVar(value='Ready')
         ttk.Label(self.root, textvariable=self.status_var, anchor='w').pack(fill='x', padx=8, pady=(0, 8))
 
-    # ---- heading tooltips --------------------------------------------------------
+    # ---- tooltips (column headings and buttons) -----------------------------------
     def _on_tree_motion(self, event):
         col = None
         if self.tree.identify_region(event.x, event.y) == 'heading':
             idx = int(self.tree.identify_column(event.x).lstrip('#')) - 1
             col = COLUMNS[idx] if 0 <= idx < len(COLUMNS) else None
         text = COLUMN_TOOLTIPS.get(col)
-        if not text:
+        if text:
+            self._show_tooltip(text, event.x_root, event.y_root)
+        else:
             self._hide_tooltip()
-            return
-        x, y = event.x_root + 12, event.y_root + 16
+
+    def _add_tooltip(self, widget, text):
+        widget.bind('<Enter>', lambda e: self._show_tooltip(text, e.x_root, e.y_root))
+        widget.bind('<Motion>', lambda e: self._show_tooltip(text, e.x_root, e.y_root))
+        widget.bind('<Leave>', lambda _e: self._hide_tooltip())
+        widget.bind('<ButtonPress>', lambda _e: self._hide_tooltip(), add='+')
+
+    def _show_tooltip(self, text, x_root, y_root):
+        """Show `text` next to the pointer, or just move the tooltip if it's already shown."""
+        x, y = x_root + 12, y_root + 16
         if self._tooltip and self._tooltip_text == text:
             self._tooltip.geometry(f'+{x}+{y}')
             return
